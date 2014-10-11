@@ -12,13 +12,21 @@ import kafka.utils.ZKStringSerializer
 import org.I0Itec.zkclient.ZkClient
 import com.quantifind.kafka.OffsetGetter
 
+import scala.sys.process._
+
 class OffsetGetterArgsWGT extends OffsetGetterArgs {
   @Required
+  var prefix: String = _
+
   var group: String = _
 
   var topics: Seq[String] = Seq()
 
-  var sumPart: Boolean = false
+  var refresh: FiniteDuration = _
+
+  var graphite: String = _
+
+  var combine: Boolean = true
 
   var onlyOffsets: Boolean = false
 
@@ -35,6 +43,20 @@ class OffsetGetterArgs extends FieldArgs {
 
 }
 
+case class Metric(prefix: String, group: String, topic: String, partition: Option[String], metric: String, value: Long, timestamp: Long) {
+  def combinedKey = {
+    val has_partition = partition.getOrElse("all")
+    Array(prefix, group, topic, has_partition, metric).mkString(".")
+  }
+  override def toString = {
+    s"$combinedKey $value $timestamp"
+  }
+  def send(host: String, port: String) = {
+    println(toString)
+    (s"echo $combinedKey $value $timestamp" #| s"nc -q0 $host $port")!
+  }
+}
+
 /**
  * TODO DOC
  * User: pierre
@@ -43,6 +65,8 @@ class OffsetGetterArgs extends FieldArgs {
 object OffsetGetterApp extends ArgMain[OffsetGetterArgsWGT] {
 
   def main(args: OffsetGetterArgsWGT) {
+    val graphite_host = args.graphite.split(":")(0)
+    val graphite_port = args.graphite.split(":")(1)
     var zkClient: ZkClient = null
     var og: OffsetGetter = null
     try {
@@ -51,18 +75,14 @@ object OffsetGetterApp extends ArgMain[OffsetGetterArgsWGT] {
         args.zkConnectionTimeout.toMillis.toInt,
         ZKStringSerializer)
       og = new OffsetGetter(zkClient)
-      val i = og.getInfo(args.group, args.topics)
-
-      if (i.offsets.nonEmpty) {
-        if (!args.onlyOffsets) {
-          println()
-        }
-        if (args.sumPart) {
-          if (!args.onlyOffsets) {
-            println("%-15s\t%-40s\t%-15s\t%-15s\t%-15s".format("Group", "Topic", "Offset", "logSize", "Lag"))
-          }
-          i.offsets.groupBy(info => (info.group, info.topic))
-            .flatMap {
+      //val graphite = new Graphite(args.graphite.split(":")(0), args.graphite.split(":")(1))
+      while (true) {
+        val i = og.getInfo(args.group, args.topics)
+        val timestamp: Long = System.currentTimeMillis / 1000
+        if (i.offsets.nonEmpty) {
+          if (args.combine) {
+            i.offsets.groupBy(info => (info.group, info.topic))
+              .flatMap {
               case (_, infoGrp) =>
                 infoGrp.headOption map { head =>
                   val (offset, log, lag) = infoGrp.foldLeft((0l, 0l, 0l)) {
@@ -70,33 +90,30 @@ object OffsetGetterApp extends ArgMain[OffsetGetterArgsWGT] {
                       (offAcc + info.offset, logAcc + info.logSize, lagAcc + info.lag)
                   }
                   val fmtedLag = if (args.formatLagOutput) NumberFormat.getIntegerInstance().format(lag) else lag
-                  "%-15s\t%-40s\t%-15s\t%-15s\t%-15s".format(head.group, head.topic, offset, log, fmtedLag)
+                  List(
+                    Metric(args.prefix, head.group, head.topic, None, "offset", offset, timestamp),
+                    Metric(args.prefix, head.group, head.topic, None, "logsize", log, timestamp),
+                    Metric(args.prefix, head.group, head.topic, None, "lag", lag, timestamp)
+                  )
                 }
-            }.foreach(println)
+            }.flatten.foreach(_.send(graphite_host, graphite_port))
+          } else {
+            i.offsets.map {
+              info =>
+                val fmtedLag = if (args.formatLagOutput) NumberFormat.getIntegerInstance().format(info.lag) else info.lag
+                List(
+                  Metric(args.prefix, info.group, info.topic, Some(info.partition.toString), "offset", info.offset, timestamp),
+                  Metric(args.prefix, info.group, info.topic, Some(info.partition.toString), "logsize", info.logSize, timestamp),
+                  Metric(args.prefix, info.group, info.topic, Some(info.partition.toString), "lag", info.lag, timestamp)
+                )
+            }.flatten.foreach(_.send(graphite_host, graphite_port))
+          }
         } else {
-          if (!args.onlyOffsets) {
-            println("%-15s\t%-40s\t%-3s\t%-15s\t%-15s\t%-15s\t%s".format("Group", "Topic", "Pid", "Offset", "logSize", "Lag", "Owner"))
-          }
-          i.offsets.foreach {
-            info =>
-              val fmtedLag = if (args.formatLagOutput) NumberFormat.getIntegerInstance().format(info.lag) else info.lag
-              println("%-15s\t%-40s\t%-3s\t%-15s\t%-15s\t%-15s\t%s".format(info.group, info.topic, info.partition, info.offset, info.logSize, fmtedLag,
-                info.owner.getOrElse("none")))
-          }
+          System.err.println(s"no topics for group ${args.group}")
         }
-
-        if (!args.onlyOffsets) {
-          println()
-          println("Brokers")
-          i.brokers.foreach {
-            b =>
-              println(s"${b.id}\t${b.host}:${b.port}")
-          }
-        }
-      } else {
-        System.err.println(s"no topics for group ${args.group}")
+        //Every n seconds
+        Thread.sleep(args.refresh.toMillis)
       }
-
     } finally {
       if (og != null) og.close()
       if (zkClient != null)
