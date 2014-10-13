@@ -34,7 +34,7 @@ If you do not want to build it manually, just download the [current jar](https:/
 This is a small webapp, you can run it locally or on a server, as long as you have access to the ZooKeeper nodes controlling kafka.
 
 ```
-java -cp KafkaOffsetMonitor-assembly-0.1.0-SNAPSHOT.jar \
+java -cp KafkaOffsetMonitor-assembly-0.2.1-SNAPSHOT.jar \
      com.quantifind.kafka.offsetapp.OffsetGetterWeb \
      --zk zk-server1,zk-server2 \
      --port 8080 \
@@ -49,3 +49,23 @@ The arguments are:
 - **refresh** how often should the app refresh and store a point in the DB
 - **retain** how long should points be kept in the DB
 - **dbName** where to store the history (default 'offsetapp')
+
+To Run it as a daemon, exporting graphite metrics
+=======================================
+    java -cp KafkaOffsetMonitor-assembly-0.2.1-SNAPSHOT.jar \
+         com.quantifind.kafka.offsetapp.OffsetGetterApp \
+         --zk zk-server1,zk-server2:2181/kafka \
+         --prefix KafkaOffsetMonitor.kafka.production.dc1 \
+         --group MirrorMaker \
+         --topics weblogs \
+         --refresh 7.seconds \
+         --graphite graphite-cluster.domain.com:2003
+
+The arguments are:
+
+- **zk** the ZooKeeper hosts
+- **prefix** an arbitrary doted prefix for your graphite metric
+- **group** Kafka consumer group
+- **topics** coma separated list of Kafka topics
+- **refresh** how often should the app refresh and send the metrics to graphite
+- **graphite** host:port combination of the graphite carbon endpoints
